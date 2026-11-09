@@ -412,7 +412,11 @@ namespace QuickDeploy
                 RenderGroups();
                 RenderDetail();
             };
+            // built when it opens, not with the column: columns are kept from one draw to the next,
+            // and a menu built with one held the groups there were then -- groups made since were
+            // missing from it until the column was drawn again (the user, 2026-11-07)
             col.ContextMenu = ColumnMenu(parent);
+            col.ContextMenuOpening += (s, e) => col.ContextMenu = ColumnMenu(parent);
             return FillColumn(col, list, index, parent, shown, under, visible, narrowed, active);
         }
 
@@ -564,7 +568,13 @@ namespace QuickDeploy
                 if (e.ClickCount == 2) { e.Handled = true; RenameGroup(g); return; }
                 gDragFrom = ("group", g.Id, g.Name, e.GetPosition(GroupScroll));
             };
+            // built when it opens, not with the item: items are kept while what they show does not
+            // change, and a menu built with one held the groups there were then -- a group made
+            // since was missing from "move to group" (the user, 2026-11-07). The group is looked
+            // up again too, as the item may be from an older read.
+            var gid = g.Id;
             item.ContextMenu = FolderMenu(g);
+            item.ContextMenuOpening += (s, e) => item.ContextMenu = FolderMenu(GroupOf(gid) ?? g);
             return item;
         }
 
@@ -650,18 +660,35 @@ namespace QuickDeploy
                 if (e.ClickCount == 2) { e.Handled = true; RenameMod(m); return; }
                 gDragFrom = ("mod", m.Id, m.Name, e.GetPosition(GroupScroll));
             };
+            // built when it opens, not with the item: items are kept while what they show does not
+            // change, and a menu built with one held the mods taken and the groups there were then
+            // -- of several mods chosen with Ctrl only the one clicked moved, and a group made
+            // since was missing from "move to group" (the user, 2026-11-07). The mod is looked up
+            // again too, as the item may be from an older read.
+            var id = m.Id;
+            item.ContextMenu = ModMenu(m);
+            item.ContextMenuOpening += (s, e) => item.ContextMenu = ModMenu(st?.Mods.FirstOrDefault(x => x.Id == id) ?? m);
+            return item;
+        }
+
+        /// <summary>A mod's menu (Menu), with a group made here at its top. Made again each time the
+        /// item's menu opens: what it offers follows the mods taken with this one and the groups
+        /// there are now, and the item is kept while its own look (ItemSig) stays the same, so it
+        /// cannot be made anew for those.</summary>
+        ContextMenu ModMenu(ModRow m)
+        {
             var menu = Menu(m);
             // a group made here: with no group yet the column is long and its button far down
             // (the user, 2026-10-27)
-            if (m.Group == null || LevelOf(m.Group) < Groups.Depth)
+            var parent = m.Group;
+            if (parent == null || LevelOf(parent) < Groups.Depth)
             {
                 var make = new MenuItem { Header = Texts.Get("g_new_top") };
-                make.Click += (s, e) => NewGroup(m.Group);
+                make.Click += (s, e) => NewGroup(parent);
                 menu.Items.Insert(0, make);
                 menu.Items.Insert(1, new Separator());
             }
-            item.ContextMenu = menu;
-            return item;
+            return menu;
         }
 
         ContextMenu ColumnMenu(string parent)
@@ -1019,6 +1046,7 @@ namespace QuickDeploy
             if (which == "groupdrag") { GroupDragTest(); return; }
             if (which == "groupdragtaken") { GroupDragTakenTest(); return; }
             if (which == "groupmenu") { GroupMenuTest(); return; }
+            if (which == "groupmenufresh") { GroupMenuFreshTest(); return; }
             if (which != "groups") return;
             var t = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
             t.Tick += (s, e) =>
@@ -1198,6 +1226,137 @@ namespace QuickDeploy
                         if (inner != null) inner.IsSubmenuOpen = true;
                     }), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 }), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            };
+            t.Start();
+        }
+
+        /// <summary>HD2QD_CLICK_TEST=groupmenufresh: the menu of a column's item built when it opens,
+        /// not with the item. Three mods are taken and a group is made, and the item of a taken mod
+        /// is looked at before and after its menu is opened the way a right click opens it (the
+        /// opening event raised here, as a posted click does not reach WPF). A menu built once with
+        /// the item holds the one mod and the groups there were then: of several mods taken only the
+        /// one clicked moved, and a group made since was missing from "move to group" until
+        /// something drew the item again (issues #18, #19). What made both come back is 0.19.0's
+        /// drawing: a column keeps its items while what they show does not change, and neither the
+        /// mods taken nor the groups there are now are part of that. The checks come as "key=value"
+        /// lines -- many_before, many_after, taken, newest_before, newest_after, item_kept -- and
+        /// "item_kept" is the one that says the run tested anything at all: false, and the item was
+        /// made anew, so nothing kept was looked at. The "move to group" tree as it stands follows
+        /// them, for a person reading it; a run that could not be made says "aborted=why" alone.
+        /// The library it reads wants three mods at the top and no group already called "Newest":
+        /// one there already and newest_before says true, reading as a failure of the very fix this
+        /// looks for (a first run against a library that had one did, 2026-11-07).</summary>
+        void GroupMenuFreshTest()
+        {
+            var t = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
+            t.Tick += (s, e) =>
+            {
+                t.Stop();
+                var path = Environment.GetEnvironmentVariable("HD2QD_WHEEL_OUT");
+                var log = new System.Text.StringBuilder();
+                void Write()
+                {
+                    if (path != null) System.IO.File.WriteAllText(path, log.ToString());
+                }
+                // the top of the groups, the mods there not taken and nothing chosen
+                groupView = true;
+                groupPath.Clear();
+                selectedId = null;
+                picked.Clear();
+                RenderList();
+                UpdateLayout();
+                // three of the top column's mods, taken as Ctrl-clicking them takes them: the items
+                // are drawn with them taken, and kept, as what they show has not changed
+                var mods = GroupShown().Where(m => m.Group == null).Take(3).ToList();
+                if (mods.Count < 3)
+                {
+                    log.AppendLine("aborted=mods:" + mods.Count + " (need 3 at the top of the groups)");
+                    Write();
+                    return;
+                }
+                foreach (var m in mods) picked.Add(m.Id);
+                selectedId = mods[mods.Count - 1].Id;
+                RenderList();
+                UpdateLayout();
+                // the item drawn for the first of them, as the drawing keeps it
+                FrameworkElement ItemOf(string id) =>
+                    colKept.TryGetValue("", out var kept) && kept.TryGetValue("m" + id, out var k) ? k.Item as FrameworkElement : null;
+                var item = ItemOf(mods[0].Id);
+                if (item == null)
+                {
+                    log.AppendLine("aborted=item_not_kept:" + mods[0].Name + " (the top column kept no item of it)");
+                    Write();
+                    return;
+                }
+                MenuItem MoveTo(ContextMenu cm) => cm?.Items.OfType<MenuItem>().FirstOrDefault(x => (x.Header as string) == Texts.Get("g_move_to"));
+                // the menu of several mods, which the one built with the item is not
+                bool Many(ContextMenu cm) => cm != null && cm.Items.OfType<MenuItem>().Any(x =>
+                    (x.Header as string) == Texts.F("many_off", 3) || (x.Header as string) == Texts.F("many_on", 3));
+                bool Has(ItemsControl menu, string header)
+                {
+                    foreach (var x in menu.Items)
+                    {
+                        if (!(x is MenuItem mi)) continue;
+                        if ((mi.Header as string) == header || Has(mi, header)) return true;
+                    }
+                    return false;
+                }
+                bool HasNewest(ContextMenu cm) => MoveTo(cm) is MenuItem move && Has(move, "Newest");
+                bool manyBefore = Many(item.ContextMenu);
+                bool newestBefore = HasNewest(item.ContextMenu);
+                // a group of that name already there would be in the menu before it opened, and the
+                // run would read as the fix not working
+                if (st.Groups.Any(g => string.Equals(g.Name, "Newest", StringComparison.CurrentCultureIgnoreCase)))
+                {
+                    log.AppendLine("aborted=group_exists:Newest (a group of that name is already there)");
+                    Write();
+                    return;
+                }
+                // a group made in the window, at the top: the state a menu built now reads
+                st.Groups.Add(new GroupRow { Id = "qa-newest", Name = "Newest" });
+                RenderList();
+                UpdateLayout();
+                var again = ItemOf(mods[0].Id);
+                // false: the item was made anew, so this run drew nothing that is kept and says nothing
+                bool itemKept = ReferenceEquals(item, again);
+                if (again == null)
+                {
+                    log.AppendLine("aborted=item_gone:" + mods[0].Name + " (the top column kept no item of it after the group was made)");
+                    Write();
+                    return;
+                }
+                // what a right click does first, the opening event, then the menu read off the item
+                var args = (ContextMenuEventArgs)Activator.CreateInstance(typeof(ContextMenuEventArgs),
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance, null,
+                    new object[] { again, true, 0.0, 0.0 }, null);
+                args.RoutedEvent = FrameworkElement.ContextMenuOpeningEvent;
+                again.RaiseEvent(args);
+                log.AppendLine("many_before=" + manyBefore);
+                log.AppendLine("many_after=" + Many(again.ContextMenu));
+                // what an action on the item's mod would act on, taken as the menu itself takes
+                // them (Taken): three. What was put in picked, not what the menu made of it.
+                var fresh = st?.Mods.FirstOrDefault(x => x.Id == mods[0].Id) ?? mods[0];
+                log.AppendLine("taken=" + Taken(fresh).Count);
+                log.AppendLine("newest_before=" + newestBefore);
+                log.AppendLine("newest_after=" + HasNewest(again.ContextMenu));
+                log.AppendLine("item_kept=" + itemKept);
+                // the tree itself, for a person reading it: "Newest" among the groups to move to
+                log.AppendLine();
+                log.AppendLine("== move to group, after it opened");
+                var tree = MoveTo(again.ContextMenu);
+                if (tree == null) log.AppendLine("(no move to group)");
+                else Dump(tree, 1);
+                Write();
+                void Dump(ItemsControl menu, int depth)
+                {
+                    foreach (var x in menu.Items)
+                    {
+                        if (x is Separator) { log.AppendLine(new string(' ', depth * 2) + "--"); continue; }
+                        if (!(x is MenuItem mi)) continue;
+                        log.AppendLine(new string(' ', depth * 2) + mi.Header + (mi.IsChecked ? "  [x]" : "") + (mi.IsEnabled ? "" : "  (off)"));
+                        Dump(mi, depth + 1);
+                    }
+                }
             };
             t.Start();
         }
